@@ -1,0 +1,277 @@
+#!/bin/bash
+set -euo pipefail
+
+exec > >(tee -a /var/log/single-ec2-web-stack-bootstrap.log) 2>&1
+
+INSTALL_NGINX="${install_nginx}"
+INSTALL_MYSQL="${install_mysql}"
+INSTALL_NODEJS="${install_nodejs}"
+NODEJS_VERSION="${nodejs_version}"
+MYSQL_PACKAGE_NAME="${mysql_package_name}"
+ENABLE_SECURITY_TOOLS="${enable_security_tools}"
+ENABLE_AUTOMATIC_SECURITY_UPDATES="${enable_automatic_security_updates}"
+ENABLE_HOST_FIREWALL="${enable_host_firewall}"
+APP_PORTS="${application_ports}"
+
+export DEBIAN_FRONTEND=noninteractive
+
+if [[ -r /etc/os-release ]]; then
+  . /etc/os-release
+else
+  ID="unknown"
+  ID_LIKE=""
+fi
+
+log() {
+  echo "[$(date --iso-8601=seconds)] $*"
+}
+
+has_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+detect_package_manager() {
+  if has_command apt-get; then
+    echo "apt"
+  elif has_command dnf; then
+    echo "dnf"
+  elif has_command yum; then
+    echo "yum"
+  elif has_command zypper; then
+    echo "zypper"
+  else
+    echo "unknown"
+  fi
+}
+
+PM="$(detect_package_manager)"
+ARCH="$(uname -m)"
+
+pkg_update() {
+  case "$PM" in
+    apt)
+      apt-get update -y
+      ;;
+    dnf)
+      dnf makecache -y
+      ;;
+    yum)
+      yum makecache -y
+      ;;
+    zypper)
+      zypper --non-interactive refresh
+      ;;
+    *)
+      log "No supported package manager found; skipping package update."
+      ;;
+  esac
+}
+
+pkg_install() {
+  case "$PM" in
+    apt)
+      apt-get install -y "$@"
+      ;;
+    dnf)
+      dnf install -y "$@"
+      ;;
+    yum)
+      yum install -y "$@"
+      ;;
+    zypper)
+      zypper --non-interactive install -y "$@"
+      ;;
+    *)
+      log "No supported package manager found; cannot install: $*"
+      return 1
+      ;;
+  esac
+}
+
+pkg_install_optional() {
+  local pkg
+  for pkg in "$@"; do
+    if pkg_install "$pkg"; then
+      return 0
+    fi
+    log "Optional package install failed: $pkg"
+  done
+  return 1
+}
+
+enable_service_if_present() {
+  local service
+  for service in "$@"; do
+    if systemctl list-unit-files "$${service}.service" >/dev/null 2>&1; then
+      systemctl enable --now "$service"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pkg_update
+pkg_install ca-certificates curl gzip openssl tar || true
+
+if [[ "$ENABLE_SECURITY_TOOLS" == "true" ]]; then
+  log "Installing baseline security tooling."
+  case "$PM" in
+    apt)
+      pkg_install_optional auditd fail2ban unattended-upgrades ufw || true
+      ;;
+    dnf|yum)
+      pkg_install_optional audit fail2ban firewalld || true
+      ;;
+    zypper)
+      pkg_install_optional audit fail2ban firewalld || true
+      ;;
+  esac
+
+  enable_service_if_present auditd audit || true
+  enable_service_if_present fail2ban || true
+fi
+
+if [[ "$ENABLE_AUTOMATIC_SECURITY_UPDATES" == "true" ]]; then
+  log "Configuring automatic security updates where supported."
+  case "$PM" in
+    apt)
+      pkg_install_optional unattended-upgrades || true
+      dpkg-reconfigure -f noninteractive unattended-upgrades || true
+      ;;
+    dnf)
+      pkg_install_optional dnf-automatic || true
+      if [[ -f /etc/dnf/automatic.conf ]]; then
+        sed -i 's/^apply_updates = .*/apply_updates = yes/' /etc/dnf/automatic.conf || true
+      fi
+      systemctl enable --now dnf-automatic.timer || true
+      ;;
+    yum)
+      pkg_install_optional yum-cron || true
+      if [[ -f /etc/yum/yum-cron.conf ]]; then
+        sed -i 's/^apply_updates = .*/apply_updates = yes/' /etc/yum/yum-cron.conf || true
+      fi
+      enable_service_if_present yum-cron || true
+      ;;
+    zypper)
+      pkg_install_optional transactional-update zypper-lifecycle-plugin || true
+      ;;
+  esac
+fi
+
+if [[ "$INSTALL_NGINX" == "true" ]]; then
+  log "Installing Nginx."
+  pkg_install_optional nginx || true
+  enable_service_if_present nginx || true
+fi
+
+if [[ "$INSTALL_MYSQL" == "true" ]]; then
+  log "Installing MySQL-compatible database server."
+  if [[ -n "$MYSQL_PACKAGE_NAME" ]]; then
+    pkg_install_optional "$MYSQL_PACKAGE_NAME" || true
+  else
+    case "$PM" in
+      apt)
+        pkg_install_optional mysql-server mariadb-server || true
+        ;;
+      dnf|yum)
+        pkg_install_optional mysql-server mariadb105-server mariadb-server || true
+        ;;
+      zypper)
+        pkg_install_optional mysql-community-server mariadb || true
+        ;;
+    esac
+  fi
+  enable_service_if_present mysqld mariadb mysql || true
+fi
+
+install_nodejs_binary() {
+  local requested version checksum_url tarball_url tarball checksum expected node_arch
+
+  case "$ARCH" in
+    x86_64|amd64)
+      node_arch="x64"
+      ;;
+    aarch64|arm64)
+      node_arch="arm64"
+      ;;
+    *)
+      log "Unsupported architecture for upstream Node.js binary: $ARCH"
+      return 1
+      ;;
+  esac
+
+  requested="$NODEJS_VERSION"
+  if [[ "$requested" == "latest" ]]; then
+    version="$(curl -fsSL https://nodejs.org/dist/index.json | sed -n 's/.*"version":"\\([^"]*\\)".*/\\1/p' | head -n 1)"
+  elif [[ "$requested" == v* ]]; then
+    version="$requested"
+  else
+    version="v$requested"
+  fi
+
+  if [[ -z "$version" ]]; then
+    log "Could not resolve Node.js version."
+    return 1
+  fi
+
+  tarball="node-$${version}-linux-$${node_arch}.tar.xz"
+  tarball_url="https://nodejs.org/dist/$${version}/$${tarball}"
+  checksum_url="https://nodejs.org/dist/$${version}/SHASUMS256.txt"
+
+  cd /tmp
+  curl -fsSLO "$tarball_url"
+  curl -fsSLO "$checksum_url"
+  expected="$(grep " $${tarball}$" SHASUMS256.txt | awk '{print $1}')"
+  checksum="$(sha256sum "$tarball" | awk '{print $1}')"
+
+  if [[ -z "$expected" || "$checksum" != "$expected" ]]; then
+    log "Node.js checksum verification failed."
+    return 1
+  fi
+
+  rm -rf /usr/local/lib/nodejs
+  mkdir -p /usr/local/lib/nodejs
+  tar -xJf "$tarball" -C /usr/local/lib/nodejs
+  ln -sfn "/usr/local/lib/nodejs/node-$${version}-linux-$${node_arch}/bin/node" /usr/local/bin/node
+  ln -sfn "/usr/local/lib/nodejs/node-$${version}-linux-$${node_arch}/bin/npm" /usr/local/bin/npm
+  ln -sfn "/usr/local/lib/nodejs/node-$${version}-linux-$${node_arch}/bin/npx" /usr/local/bin/npx
+}
+
+if [[ "$INSTALL_NODEJS" == "true" ]]; then
+  log "Installing Node.js."
+  pkg_install xz || pkg_install xz-utils || true
+  install_nodejs_binary
+fi
+
+if [[ "$ENABLE_HOST_FIREWALL" == "true" ]]; then
+  log "Configuring host firewall."
+  if has_command ufw; then
+    ufw --force reset
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow 22/tcp
+    if [[ "$INSTALL_NGINX" == "true" ]]; then
+      ufw allow 80/tcp
+      ufw allow 443/tcp
+    fi
+    IFS=',' read -ra PORTS <<< "$APP_PORTS"
+    for port in "$${PORTS[@]}"; do
+      [[ -n "$port" ]] && ufw allow "$port/tcp"
+    done
+    ufw --force enable
+  elif has_command firewall-cmd; then
+    enable_service_if_present firewalld || true
+    firewall-cmd --permanent --add-service=ssh || true
+    if [[ "$INSTALL_NGINX" == "true" ]]; then
+      firewall-cmd --permanent --add-service=http || true
+      firewall-cmd --permanent --add-service=https || true
+    fi
+    IFS=',' read -ra PORTS <<< "$APP_PORTS"
+    for port in "$${PORTS[@]}"; do
+      [[ -n "$port" ]] && firewall-cmd --permanent --add-port="$port/tcp" || true
+    done
+    firewall-cmd --reload || true
+  fi
+fi
+
+log "Bootstrap complete."
