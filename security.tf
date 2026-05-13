@@ -85,6 +85,15 @@ resource "aws_vpc_security_group_ingress_rule" "application_port_range" {
   to_port           = 11000
 }
 
+resource "aws_vpc_security_group_ingress_rule" "filebeat_to_logstash" {
+  security_group_id            = aws_security_group.git_server.id
+  description                  = "Allow Filebeat to Logstash from peer instances"
+  referenced_security_group_id = aws_security_group.git_server.id
+  from_port                    = 5044
+  ip_protocol                  = "tcp"
+  to_port                      = 5044
+}
+
 resource "aws_vpc_security_group_ingress_rule" "wireguard" {
   for_each = toset(var.allowed_application_cidr_blocks)
 
@@ -105,6 +114,15 @@ resource "aws_vpc_security_group_egress_rule" "tcp" {
   from_port         = each.value.port
   ip_protocol       = "tcp"
   to_port           = each.value.port
+}
+
+resource "aws_vpc_security_group_egress_rule" "filebeat_to_logstash" {
+  security_group_id            = aws_security_group.git_server.id
+  description                  = "Allow outbound Filebeat to Logstash on peer instances"
+  referenced_security_group_id = aws_security_group.git_server.id
+  from_port                    = 5044
+  ip_protocol                  = "tcp"
+  to_port                      = 5044
 }
 
 resource "aws_vpc_security_group_egress_rule" "dns_udp" {
