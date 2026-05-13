@@ -63,6 +63,39 @@ resource "aws_vpc_security_group_ingress_rule" "application_ports" {
   to_port           = each.value.port
 }
 
+resource "aws_vpc_security_group_ingress_rule" "smtp_submission" {
+  for_each = toset(var.allowed_application_cidr_blocks)
+
+  security_group_id = aws_security_group.git_server.id
+  description       = "Allow SMTP submission"
+  cidr_ipv4         = each.value
+  from_port         = 587
+  ip_protocol       = "tcp"
+  to_port           = 587
+}
+
+resource "aws_vpc_security_group_ingress_rule" "application_port_range" {
+  for_each = toset(var.allowed_application_cidr_blocks)
+
+  security_group_id = aws_security_group.git_server.id
+  description       = "Allow application port range 3000-11000"
+  cidr_ipv4         = each.value
+  from_port         = 3000
+  ip_protocol       = "tcp"
+  to_port           = 11000
+}
+
+resource "aws_vpc_security_group_ingress_rule" "wireguard" {
+  for_each = toset(var.allowed_application_cidr_blocks)
+
+  security_group_id = aws_security_group.git_server.id
+  description       = "Allow WireGuard"
+  cidr_ipv4         = each.value
+  from_port         = 51820
+  ip_protocol       = "udp"
+  to_port           = 51820
+}
+
 resource "aws_vpc_security_group_egress_rule" "tcp" {
   for_each = local.tcp_egress_rules
 

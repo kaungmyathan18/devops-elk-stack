@@ -1,16 +1,16 @@
 output "instance_id" {
-  description = "ID of the web stack EC2 instance."
-  value       = module.ec2_instance.id
+  description = "IDs of the web stack EC2 instances."
+  value       = module.ec2_instance[*].id
 }
 
 output "instance_private_ip" {
-  description = "Private IP address of the web stack instance."
-  value       = module.ec2_instance.private_ip
+  description = "Private IP addresses of the web stack instances."
+  value       = module.ec2_instance[*].private_ip
 }
 
 output "instance_public_ip" {
-  description = "Public IP address of the Git server when deployed in a public subnet."
-  value       = module.ec2_instance.public_ip
+  description = "Public IP addresses of the Git server instances when deployed in public subnets."
+  value       = module.ec2_instance[*].public_ip
 }
 
 output "security_group_id" {

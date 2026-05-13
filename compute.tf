@@ -2,8 +2,8 @@ module "ec2_instance" {
   source  = "terraform-aws-modules/ec2-instance/aws"
   version = "~> 5.0"
 
-  name = var.project_name
-
+  name                        = "${var.project_name}-${["ELK", "Server"][count.index]}"
+  count                       = 2
   ami                         = coalesce(var.ami_id, data.aws_ami.amazon_linux_2023.id)
   instance_type               = var.instance_type
   key_name                    = var.create_key_pair ? aws_key_pair.git_server[0].key_name : var.key_name
@@ -17,7 +17,7 @@ module "ec2_instance" {
     install_mysql                     = var.install_mysql
     install_nodejs                    = var.install_nodejs
     nodejs_version                    = var.nodejs_version
-    mysql_package_name                = coalesce(var.mysql_package_name, "")
+    mysql_package_name                = var.mysql_package_name == null ? "" : var.mysql_package_name
     enable_security_tools             = var.enable_security_tools
     enable_automatic_security_updates = var.enable_automatic_security_updates
     enable_host_firewall              = var.enable_host_firewall
